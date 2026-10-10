@@ -1,0 +1,124 @@
+from flask import Flask, request
+from twilio.twiml.voice_response import VoiceResponse, Gather
+from twilio.rest import Client
+import os
+
+app = Flask(__name__)
+
+# Twilio credentials fetched from server environment variables
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER")
+
+client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+# -------------------------------------------------------------
+# STEP 1: Inbound Call Entry Point
+# -------------------------------------------------------------
+@app.route("/voice", methods=['POST'])
+def voice():
+    response = VoiceResponse()
+    
+    # Gather collects keypad presses (DTMF)
+    gather = Gather(num_digits=1, action='/triage/q1', method='POST')
+    gather.say(
+        "Welcome to National Emergency Triage. "
+        "If the patient is unresponsive, having a seizure, or struggling to breathe, press 1. "
+        "Otherwise, press 2.",
+        voice='alice'
+    )
+    response.append(gather)
+    
+    # If user presses nothing, repeat the menu
+    response.redirect('/voice')
+    return str(response)
+
+# -------------------------------------------------------------
+# STEP 2: Question 1 Evaluation
+# -------------------------------------------------------------
+@app.route("/triage/q1", methods=['POST'])
+def triage_q1():
+    digit = request.values.get('Digits', '')
+    response = VoiceResponse()
+
+    if digit == '1':
+        return deliver_outcome(response, tier="RED")
+
+    gather = Gather(num_digits=1, action='/triage/q2', method='POST')
+    gather.say(
+        "Is there crushing chest pain, severe bleeding, or sudden paralysis? Press 1 for Yes, 2 for No.",
+        voice='alice'
+    )
+    response.append(gather)
+    return str(response)
+
+# -------------------------------------------------------------
+# STEP 3: Question 2 Evaluation
+# -------------------------------------------------------------
+@app.route("/triage/q2", methods=['POST'])
+def triage_q2():
+    digit = request.values.get('Digits', '')
+    response = VoiceResponse()
+
+    if digit == '1':
+        return deliver_outcome(response, tier="RED")
+
+    gather = Gather(num_digits=1, action='/triage/q3', method='POST')
+    gather.say(
+        "On a scale of severity: Press 3 for severe unbearable pain. "
+        "Press 2 for moderate illness. Press 1 for mild symptoms.",
+        voice='alice'
+    )
+    response.append(gather)
+    return str(response)
+
+# -------------------------------------------------------------
+# STEP 4: Question 3 & Final Grading
+# -------------------------------------------------------------
+@app.route("/triage/q3", methods=['POST'])
+def triage_q3():
+    digit = request.values.get('Digits', '')
+    response = VoiceResponse()
+
+    if digit == '3':
+        tier = "YELLOW"
+    elif digit == '2':
+        tier = "AMBER"
+    else:
+        tier = "GREEN"
+
+    return deliver_outcome(response, tier=tier)
+
+# -------------------------------------------------------------
+# Helper: Speak Result + Send SMS
+# -------------------------------------------------------------
+def deliver_outcome(response, tier):
+    caller_number = request.values.get('From', '')
+
+    if tier == "RED":
+        spoken_msg = "Critical emergency Code Red. Stay on the line while emergency services are alerted."
+        sms_msg = "[EHS Triage] CODE RED: Critical Emergency. Dispatch initiated. Stay near your phone."
+    elif tier == "YELLOW":
+        spoken_msg = "Code Yellow: Urgent medical care required today. Routing you to the nearest General Hospital."
+        sms_msg = "[EHS Triage] CODE YELLOW: Urgent Care. Proceed to General Hospital. Pre-Auth Code: #EHS-902."
+    else:
+        spoken_msg = "Code Green: Condition stable. A tele-doctor appointment has been scheduled within 24 hours."
+        sms_msg = "[EHS Triage] CODE GREEN: Non-Urgent. Consultation booked. Check details at ehs.ng/care"
+
+    # Send Follow-Up SMS via Twilio Client
+    try:
+        if caller_number:
+            client.messages.create(
+                body=sms_msg,
+                from_=TWILIO_PHONE_NUMBER,
+                to=caller_number
+            )
+    except Exception as e:
+        print(f"SMS Error: {e}")
+
+    response.say(spoken_msg, voice='alice')
+    response.hangup()
+    return str(response)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
